@@ -1289,6 +1289,81 @@ LZ4_FORCE_INLINE int LZ4HC_sequencePrice(int litlen, int mlen)
 }
 
 
+LZ4_FORCE_INLINE int
+LZ4HC_InsertAndGetLongerMatch (
+    LZ4HC_CCtx_internal* hc4,
+    const BYTE* const ip,
+    const BYTE* const iHighLimit,
+    int longest,
+    const BYTE** matchpos,
+    const int maxNbAttempts)
+{
+    U16* const chainTable = hc4->chainTable;
+    U32* const HashTable = hc4->hashTable;
+    const BYTE* const base = hc4->base;
+    const U32 ipIndex = (U32)(ip - base);
+    const U32 lowestMatchIndex = (hc4->lowLimit + (LZ4_DISTANCE_MAX + 1) > ipIndex) ? hc4->lowLimit : ipIndex - LZ4_DISTANCE_MAX;
+    int nbAttempts = maxNbAttempts;
+    U32 matchChainPos = 0;
+    U32 const pattern = LZ4_read32(ip);
+    U32 matchIndex;
+
+    DEBUGLOG(7, "LZ4HC_InsertAndGetLongerMatch");
+    LZ4HC_Insert(hc4, ip);   /* Update chains up to ip (excluded) */
+    matchIndex = HashTable[LZ4HC_hashPtr(ip)];
+    DEBUGLOG(7, "First match at index %u / %u (lowestMatchIndex)",
+                matchIndex, lowestMatchIndex);
+
+    /* single chain (head) */
+    while ((matchIndex>=lowestMatchIndex) && (nbAttempts>0)) {
+        nbAttempts--;
+        assert(matchIndex < ipIndex);
+        {   /* within current Prefix */
+            const BYTE* const matchPtr = base + matchIndex;
+            assert(matchPtr >= lowPrefixPtr);
+            assert(matchPtr < ip);
+            assert(longest >= 1);
+            if ( (matchPtr[longest] == ip[longest])
+              && (LZ4_read32(matchPtr) == pattern) ) {
+                int const matchLength = MINMATCH + (int)LZ4_count(ip+MINMATCH, matchPtr+MINMATCH, iHighLimit);
+                if (matchLength > longest) {
+                    longest = matchLength;
+                    *matchpos = matchPtr;
+                    if (matchIndex > (U32)matchLength) break; /* non-overlapping match */
+        }   }   }
+        matchIndex -= DELTANEXTU16(chainTable, matchIndex + matchChainPos);
+    }  /* while ((matchIndex>=lowestMatchIndex) && (nbAttempts)) */
+
+    return longest;
+
+#if 0
+        if (chainSwap && matchLength==longest) {    /* better match => select a better chain */
+            assert(lookBackLength==0);   /* search forward only */
+            if (matchIndex + (U32)longest <= ipIndex) {
+                int const kTrigger = 4;
+                U32 distanceToNextMatch = 1;
+                int const end = longest - MINMATCH + 1;
+                int step = 1;
+                int accel = 1 << kTrigger;
+                int pos;
+                for (pos = 0; pos < end; pos += step) {
+                    U32 const candidateDist = DELTANEXTU16(chainTable, matchIndex + (U32)pos);
+                    step = (accel++ >> kTrigger);
+                    if (candidateDist > distanceToNextMatch) {
+                        distanceToNextMatch = candidateDist;
+                        matchChainPos = (U32)pos;
+                        accel = 1 << kTrigger;
+                    }
+                }
+                if (distanceToNextMatch > 1) {
+                    if (distanceToNextMatch > matchIndex) break;   /* avoid overflow */
+                    matchIndex -= distanceToNextMatch;
+                    continue;
+        }   }   }
+#endif
+
+}
+
 typedef struct {
     int off;
     int len;
@@ -1306,7 +1381,8 @@ LZ4HC_FindLongerMatch(LZ4HC_CCtx_internal* const ctx,
     /* note : LZ4HC_InsertAndGetWiderMatch() is able to modify the starting position of a match (*startpos),
      * but this won't be the case here, as we define iLowLimit==ip,
      * so LZ4HC_InsertAndGetWiderMatch() won't be allowed to search past ip */
-    int matchLength = LZ4HC_InsertAndGetWiderMatch(ctx, ip, ip, iHighLimit, minLen, &matchPtr, &ip, nbSearches, 1 /*patternAnalysis*/, 1 /*chainSwap*/, dict, favorDecSpeed);
+    //int matchLength = LZ4HC_InsertAndGetWiderMatch(ctx, ip, ip, iHighLimit, minLen, &matchPtr, &ip, nbSearches, 1 /*patternAnalysis*/, 1 /*chainSwap*/, dict, favorDecSpeed);
+    int matchLength = LZ4HC_InsertAndGetLongerMatch(ctx, ip, iHighLimit, minLen, &matchPtr, nbSearches); (void)dict;
     if (matchLength <= minLen) return match;
     if (favorDecSpeed) {
         if ((matchLength>18) & (matchLength<=36)) matchLength=18;   /* favor shortcut */
