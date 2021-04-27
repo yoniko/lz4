@@ -1289,7 +1289,7 @@ LZ4_FORCE_INLINE int LZ4HC_sequencePrice(int litlen, int mlen)
 }
 
 
-LZ4_FORCE_INLINE int
+int
 LZ4HC_InsertAndGetLongerMatch (
     LZ4HC_CCtx_internal* hc4,
     const BYTE* const ip,
@@ -1303,65 +1303,103 @@ LZ4HC_InsertAndGetLongerMatch (
     const BYTE* const base = hc4->base;
     const U32 ipIndex = (U32)(ip - base);
     const U32 lowestMatchIndex = (hc4->lowLimit + (LZ4_DISTANCE_MAX + 1) > ipIndex) ? hc4->lowLimit : ipIndex - LZ4_DISTANCE_MAX;
+    const U32 maxOff = ipIndex - lowestMatchIndex;
     int nbAttempts = maxNbAttempts;
-    U32 matchChainPos = 0;
     U32 const pattern = LZ4_read32(ip);
     U32 matchIndex;
 
-    DEBUGLOG(7, "LZ4HC_InsertAndGetLongerMatch");
+    DEBUGLOG(6, "LZ4HC_InsertAndGetLongerMatch (ipIndex = %u)", ipIndex);
     LZ4HC_Insert(hc4, ip);   /* Update chains up to ip (excluded) */
     matchIndex = HashTable[LZ4HC_hashPtr(ip)];
     DEBUGLOG(7, "First match at index %u / %u (lowestMatchIndex)",
                 matchIndex, lowestMatchIndex);
 
+#define printf(...) // DEBUGLOG(2, __VA_ARGS__)
+
     /* single chain (head) */
     while ((matchIndex>=lowestMatchIndex) && (nbAttempts>0)) {
+        printf("candidate at pos: %u \n", matchIndex);
         nbAttempts--;
         assert(matchIndex < ipIndex);
         {   /* within current Prefix */
             const BYTE* const matchPtr = base + matchIndex;
-            assert(matchPtr >= lowPrefixPtr);
             assert(matchPtr < ip);
             assert(longest >= 1);
             if ( (matchPtr[longest] == ip[longest])
               && (LZ4_read32(matchPtr) == pattern) ) {
                 int const matchLength = MINMATCH + (int)LZ4_count(ip+MINMATCH, matchPtr+MINMATCH, iHighLimit);
                 if (matchLength > longest) {
+                    printf("found better match of len %i at offset %u \n", matchLength, ipIndex - matchIndex);
                     longest = matchLength;
                     *matchpos = matchPtr;
-                    if (matchIndex > (U32)matchLength) break; /* non-overlapping match */
+                    if (matchIndex + (U32)matchLength < ipIndex) break; /* non-overlapping match -> let's move to 2-chains*/
         }   }   }
-        matchIndex -= DELTANEXTU16(chainTable, matchIndex + matchChainPos);
-    }  /* while ((matchIndex>=lowestMatchIndex) && (nbAttempts)) */
+        matchIndex -= DELTANEXTU16(chainTable, matchIndex);
+    }
 
-    return longest;
+#if 1
 
-#if 0
-        if (chainSwap && matchLength==longest) {    /* better match => select a better chain */
-            assert(lookBackLength==0);   /* search forward only */
-            if (matchIndex + (U32)longest <= ipIndex) {
-                int const kTrigger = 4;
-                U32 distanceToNextMatch = 1;
-                int const end = longest - MINMATCH + 1;
-                int step = 1;
-                int accel = 1 << kTrigger;
-                int pos;
-                for (pos = 0; pos < end; pos += step) {
-                    U32 const candidateDist = DELTANEXTU16(chainTable, matchIndex + (U32)pos);
-                    step = (accel++ >> kTrigger);
-                    if (candidateDist > distanceToNextMatch) {
-                        distanceToNextMatch = candidateDist;
-                        matchChainPos = (U32)pos;
-                        accel = 1 << kTrigger;
-                    }
-                }
-                if (distanceToNextMatch > 1) {
-                    if (distanceToNextMatch > matchIndex) break;   /* avoid overflow */
-                    matchIndex -= distanceToNextMatch;
-                    continue;
+    if (nbAttempts == 0) return longest;
+    if (matchIndex < lowestMatchIndex) return longest;
+
+    printf("non-overlapping candidate at pos %u has length %i \n", matchIndex, longest);
+    U32 offset = ipIndex - matchIndex;
+    U32 headOff = offset + DELTANEXTU16(chainTable, matchIndex);
+    U32 tailOff = offset + DELTANEXTU16(chainTable, matchIndex + (U32)longest - (MINMATCH-0));
+    printf("initial headOff / tailOff = %u / %u \n", headOff, tailOff);
+
+    while ( (headOff <= maxOff) && (tailOff <= maxOff) && (headOff != tailOff) ) {
+        if (tailOff < headOff) {
+            assert(DELTANEXTU16(chainTable, ipIndex - tailOff + (U32)longest - (MINMATCH-0)) > 0);
+            tailOff = tailOff + DELTANEXTU16(chainTable, ipIndex - tailOff + (U32)longest - (MINMATCH-0));
+            printf("new tailOff = %u \n", tailOff);
+        } else {
+            headOff = headOff + DELTANEXTU16(chainTable, ipIndex - headOff);
+            printf("new headOff = %u \n", headOff);
+    }   }
+
+    /* double chain (head & tail) */
+    printf("resulting headOff / tailOff = %u / %u \n", headOff, tailOff);
+    if (tailOff > maxOff) return longest;
+    if (tailOff != headOff) return longest;
+
+    printf("longest = %i \n", longest);
+    matchIndex = ipIndex - tailOff;
+    while ((matchIndex>=lowestMatchIndex) && (nbAttempts>0)) {
+        nbAttempts--;
+        assert(matchIndex < ipIndex);
+        {   /* within current Prefix */
+            const BYTE* const matchPtr = base + matchIndex;
+            assert(matchPtr < ip);
+            assert(longest >= 1);
+            printf("matchIndex = %u \n", matchIndex);
+            if ( (matchPtr[longest] == ip[longest])
+              && (LZ4_read32(matchPtr) == pattern) ) {
+                int const matchLength = MINMATCH + (int)LZ4_count(ip+MINMATCH, matchPtr+MINMATCH, iHighLimit);
+                if (matchLength > longest) {
+                    printf("found better match of len %i at offset %u \n", matchLength, ipIndex - matchIndex);
+                    longest = matchLength;
+                    *matchpos = matchPtr;
         }   }   }
+
+        /* update */
+        offset = ipIndex - matchIndex;
+        headOff = offset + DELTANEXTU16(chainTable, matchIndex);
+        tailOff = offset + DELTANEXTU16(chainTable, matchIndex + (U32)longest - (MINMATCH-0));
+
+        while ( (headOff <= maxOff) && (tailOff <= maxOff) && (headOff != tailOff) ) {
+            if (tailOff < headOff) {
+                tailOff = tailOff + DELTANEXTU16(chainTable, ipIndex - tailOff + (U32)longest - (MINMATCH-0));
+            } else {
+                headOff = headOff + DELTANEXTU16(chainTable, ipIndex - headOff);
+        }   }
+        if (tailOff != headOff) break;
+        if (tailOff > maxOff) break;
+        matchIndex = ipIndex - tailOff;
+    }
 #endif
 
+    return longest;
 }
 
 typedef struct {
